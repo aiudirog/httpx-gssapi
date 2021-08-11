@@ -2,3 +2,4 @@ httpx>=0.16,<0.19
 gssapi
 pytest
 k5test
+proxy.py
