@@ -1,9 +1,10 @@
 import asyncio
 import re
 import logging
+import queue
 from itertools import chain
 from functools import wraps
-from typing import AsyncGenerator, Generator, Optional, List, Any, Union
+from typing import Any, AsyncGenerator, Generator, List, Optional, Union
 
 from base64 import b64encode, b64decode
 
@@ -17,6 +18,7 @@ from httpx import Auth, Request, Response
 from .exceptions import MutualAuthenticationError, SPNEGOExchangeError
 
 log = logging.getLogger(__name__)
+
 FlowGen = Generator[Request, Response, None]
 AsyncFlowGen = AsyncGenerator[Request, Response]
 
@@ -155,7 +157,7 @@ class HTTPSPNEGOAuth(Auth):
         self.mech = mech
         self.sanitize_mutual_error_response = sanitize_mutual_error_response
 
-    def sync_auth_flow(self, request: Request) -> FlowGen:
+    def auth_flow(self, request: Request) -> FlowGen:
         if self.opportunistic_auth:
             # add Authorization header before we receive a 401
             ctx = self.set_auth_header(request)
@@ -163,44 +165,6 @@ class HTTPSPNEGOAuth(Auth):
             ctx = None
 
         response = yield request
-        yield from self.handle_response(response, ctx)
-
-    async def async_auth_flow(self, request: Request) -> AsyncFlowGen:
-        if self.opportunistic_auth:
-            # GSSAPI may perform blocking I/O while acquiring credentials.
-            ctx = await asyncio.to_thread(self.set_auth_header, request)
-        else:
-            ctx = None
-
-        response = yield request
-        num_401s = 0
-        while response.status_code == 401 and num_401s < 2:
-            num_401s += 1
-            log.debug("Handling 401 response, total seen: %d", num_401s)
-
-            if _negotiate_value(response) is None:
-                log.debug("GSSAPI is not supported")
-                break
-
-            log.debug("Generating user authentication header")
-            try:
-                ctx = await asyncio.to_thread(
-                    self.set_auth_header, response.request, response
-                )
-            except SPNEGOExchangeError:
-                log.debug("Failed to generate authentication header")
-
-            response = yield response.request
-
-        if response.status_code == 401 or ctx is None:
-            log.debug("Failed to authenticate, returning 401 response")
-            return
-
-        await asyncio.to_thread(self.handle_mutual_auth, response, ctx)
-
-    def handle_response(
-        self, response: Response, ctx: Optional[SecurityContext] = None
-    ) -> FlowGen:
         num_401s = 0
         while response.status_code == 401 and num_401s < 2:
             num_401s += 1
@@ -224,6 +188,38 @@ class HTTPSPNEGOAuth(Auth):
             return
 
         self.handle_mutual_auth(response, ctx)
+
+    async def async_auth_flow(self, request: Request) -> AsyncFlowGen:
+        requests: 'asyncio.Queue[Request | BaseException]' = asyncio.Queue(1)
+        responses: 'queue.Queue[Response | None]' = queue.Queue(1)
+
+        loop = asyncio.get_running_loop()
+
+        def _put_req(r: Request | BaseException) -> None:
+            loop.call_soon_threadsafe(requests.put_nowait, r)
+
+        def _thread_target() -> None:
+            try:
+                flow = self.auth_flow(request)
+                _put_req(next(flow))
+                while True:
+                    if (resp := responses.get()) is None:
+                        break
+                    _put_req(flow.send(resp))
+            except BaseException as e:
+                _put_req(e)
+
+        thread = loop.run_in_executor(None, _thread_target)
+        try:
+            while True:
+                if isinstance(req := await requests.get(), BaseException):
+                    if isinstance(req, StopIteration):
+                        return
+                    raise req
+                responses.put_nowait((yield req))
+        finally:
+            responses.put_nowait(None)
+            await asyncio.wait_for(thread, 5)  # Ensure thread joins
 
     def handle_mutual_auth(self, response: Response, ctx: SecurityContext):
         """
