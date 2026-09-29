@@ -195,7 +195,7 @@ class HTTPSPNEGOAuth(Auth):
 
         loop = asyncio.get_running_loop()
 
-        def _put_req(r: Request | BaseException) -> None:
+        def _put_req(r: Union[Request, BaseException]) -> None:
             loop.call_soon_threadsafe(requests.put_nowait, r)
 
         def _thread_target() -> None:
