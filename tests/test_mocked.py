@@ -5,6 +5,7 @@ import asyncio
 import logging
 import threading
 from base64 import b64encode
+from typing import Union
 from unittest.mock import Mock, patch
 
 import pytest
@@ -463,7 +464,7 @@ def test_os_default_mech(patched_ctx):
 def _init_sync_flow(
     auth: httpx_gssapi.HTTPSPNEGOAuth,
     resp: httpx.Response,
-    ctx: gssapi.SecurityContext | None = None,
+    ctx: Union[gssapi.SecurityContext, None] = None,
 ) -> FlowGen:
     if ctx:
         auth.set_auth_header = lambda *_: gssapi.SecurityContext()

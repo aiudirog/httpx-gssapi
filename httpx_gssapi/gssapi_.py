@@ -193,13 +193,13 @@ class HTTPSPNEGOAuth(Auth):
 
         flow = self.auth_flow(request)
 
-        def _send(r: Response) -> Request | None:
+        def _send(r: Response) -> Union[Request, None]:
             try:
                 return flow.send(r)
             except StopIteration:  # catch here, can't pass through Future
                 return None
 
-        req: Request | None = await to_thread(next, flow)
+        req: Union[Request, None] = await to_thread(next, flow)
         while req is not None:
             resp = yield req
             req = await to_thread(_send, resp)
